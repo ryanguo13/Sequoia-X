@@ -27,6 +27,7 @@ from sequoia_x.strategy.turtle_trade import TurtleTradeStrategy
 from sequoia_x.strategy.uptrend_limit_down import UptrendLimitDownStrategy
 from sequoia_x.strategy.rps_breakout import RpsBreakoutStrategy
 from sequoia_x.strategy.private_placement import PrivatePlacementStrategy
+from sequoia_x.strategy.trend_resonance import TrendResonanceStrategy
 
 
 def main() -> None:
@@ -50,7 +51,7 @@ def main() -> None:
         engine = DataEngine(settings)
 
         if args.backfill:
-            # ── 回填模式：单线程保守拉历史 K 线，自动多轮重跑 ──
+            # ── 回填模式：8 进程并行拉历史 K 线，中断后可重跑续传 ──
             logger.info("进入回填模式...")
             all_symbols = engine.get_all_symbols()
             engine.backfill(all_symbols)
@@ -71,17 +72,20 @@ def main() -> None:
             UptrendLimitDownStrategy(engine=engine, settings=settings),
             RpsBreakoutStrategy(engine=engine, settings=settings),
             PrivatePlacementStrategy(engine=engine, settings=settings),
+            TrendResonanceStrategy(engine=engine, settings=settings),
         ]
 
         notifier = FeishuNotifier(settings)
 
-        # 5. 遍历策略，有结果则推送至对应机器人
+        # 5. 遍历策略，有结果则推送至对应机器人；同时收集结果供总结
+        all_results: dict[str, list[str]] = {}
         for strategy in strategies:
             strategy_name = type(strategy).__name__
             logger.info(f"执行策略：{strategy_name}")
 
             selected: list[str] = strategy.run()
             logger.info(f"{strategy_name} 选出 {len(selected)} 只股票")
+            all_results[strategy_name] = selected
 
             if selected:
                 notifier.send(
@@ -91,6 +95,10 @@ def main() -> None:
                 )
             else:
                 logger.info(f"{strategy_name} 无选股结果，跳过推送")
+
+        # 6. 全部策略跑完，推送超级总结套餐（含多策略共振榜）
+        notifier.send_summary(all_results)
+        logger.info("超级总结已推送")
 
     except Exception:
         try:

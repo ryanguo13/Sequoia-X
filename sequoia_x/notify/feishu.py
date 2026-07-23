@@ -11,6 +11,19 @@ from sequoia_x.core.logger import get_logger
 logger = get_logger(__name__)
 
 
+# 策略类名 -> 中文简称（用于超级总结卡片，未登记的回退到类名）
+_STRATEGY_CN = {
+    "MaVolumeStrategy": "均线放量",
+    "TurtleTradeStrategy": "海龟突破",
+    "HighTightFlagStrategy": "高窄旗形",
+    "LimitUpShakeoutStrategy": "涨停洗盘",
+    "UptrendLimitDownStrategy": "上升跌停",
+    "RpsBreakoutStrategy": "RPS突破",
+    "PrivatePlacementStrategy": "定增公告",
+    "TrendResonanceStrategy": "趋势共振",
+}
+
+
 class FeishuNotifier:
     """飞书 Webhook 推送器。
 
@@ -138,3 +151,128 @@ class FeishuNotifier:
 
         except requests.RequestException as exc:
             logger.error(f"飞书推送请求异常 [{webhook_key}]：{exc}")
+
+    # ── 超级总结套餐 ──
+
+    def _build_summary_card(self, results: dict[str, list[str]]) -> dict:
+        """汇总全部策略结果为一张总结卡片。
+
+        三段式：各策略数量一览 + 全市场去重总数 + 多策略共振榜。
+        共振榜 = 被 ≥2 个策略同时选中的个股，按命中策略数降序，最强信号置顶。
+        """
+        from collections import defaultdict
+
+        today = date.today().strftime("%Y-%m-%d")
+
+        # 1. 各策略数量（保持传入顺序）
+        count_parts = [
+            f"{_STRATEGY_CN.get(name, name)} **{len(syms)}**"
+            for name, syms in results.items()
+        ]
+        counts_text = " ｜ ".join(count_parts) if count_parts else "（无策略）"
+
+        # 2. 全市场去重
+        union: set[str] = set()
+        for syms in results.values():
+            union.update(syms)
+
+        # 3. 共振统计：symbol -> [命中的策略中文名, ...]
+        hit: dict[str, list[str]] = defaultdict(list)
+        for name, syms in results.items():
+            cn = _STRATEGY_CN.get(name, name)
+            for code in syms:
+                hit[code].append(cn)
+
+        resonance = [(code, strats) for code, strats in hit.items() if len(strats) >= 2]
+        # 命中策略数多的优先，其次代码稳定排序
+        resonance.sort(key=lambda x: (-len(x[1]), x[0]))
+        top = resonance[:20]  # 只对共振榜查名字，控制 baostock 调用量
+
+        if top:
+            names = self._get_stock_names([code for code, _ in top])
+            lines = []
+            for rank, (code, strats) in enumerate(top, 1):
+                xq = self._to_xueqiu_code(code)
+                nm = names.get(code, xq)
+                lines.append(
+                    f"{rank}. [{nm}](https://xueqiu.com/S/{xq}) "
+                    f"`×{len(strats)}` {' / '.join(strats)}"
+                )
+            resonance_text = "\n".join(lines)
+        else:
+            resonance_text = "今日无多策略共振个股"
+
+        return {
+            "msg_type": "interactive",
+            "card": {
+                "header": {
+                    "title": {
+                        "tag": "plain_text",
+                        "content": "📊 Sequoia-X 收盘总结 · 超级套餐",
+                    },
+                    "template": "purple",
+                },
+                "elements": [
+                    {
+                        "tag": "div",
+                        "text": {
+                            "tag": "lark_md",
+                            "content": (
+                                f"**日期：** {today}\n"
+                                f"**全市场去重：** 共 **{len(union)}** 只入选"
+                            ),
+                        },
+                    },
+                    {"tag": "hr"},
+                    {
+                        "tag": "div",
+                        "text": {
+                            "tag": "lark_md",
+                            "content": f"**📋 各策略选股数量**\n{counts_text}",
+                        },
+                    },
+                    {"tag": "hr"},
+                    {
+                        "tag": "div",
+                        "text": {
+                            "tag": "lark_md",
+                            "content": (
+                                "**⭐ 多策略共振榜**（被 ≥2 个策略同时选中，命中越多信号越强）\n"
+                                f"{resonance_text}"
+                            ),
+                        },
+                    },
+                ],
+            },
+        }
+
+    def send_summary(
+        self,
+        results: dict[str, list[str]],
+        webhook_key: str = "summary",
+    ) -> None:
+        """全部策略跑完后，推送一张超级总结卡片。
+
+        Args:
+            results: {策略类名: 选中代码列表}，含空结果策略。
+            webhook_key: 总结专属机器人标识，未配置则 fallback 到默认。
+        """
+        url = self.settings.get_webhook_url(webhook_key)
+        payload = self._build_summary_card(results)
+
+        try:
+            resp = requests.post(
+                url,
+                data=json.dumps(payload),
+                headers={"Content-Type": "application/json"},
+                timeout=10,
+            )
+            resp_json = resp.json()
+            if resp.status_code != 200 or resp_json.get("code") != 0:
+                logger.error(
+                    f"飞书总结推送失败 HTTP状态={resp.status_code} 飞书响应={resp.text}"
+                )
+            else:
+                logger.info("飞书总结推送成功")
+        except requests.RequestException as exc:
+            logger.error(f"飞书总结推送请求异常：{exc}")
