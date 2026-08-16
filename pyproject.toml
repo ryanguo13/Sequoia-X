@@ -20,6 +20,16 @@ dev = [
     "pytest-mock>=3.12",
 ]
 
+# ─────────────────────────────────────────────────────────
+# setuptools: 显式指定 package 发现，避免 data/ 等目录被当成 top-level package
+# 修复 GH Actions 上 uv pip install 报错：
+#   "Multiple top-level packages discovered in a flat-layout: ['data', 'sequoia_x']"
+# ─────────────────────────────────────────────────────────
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["sequoia_x*"]
+exclude = ["data*", "docs*", "tests*", "scripts*", "realtime_dashboard*"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
