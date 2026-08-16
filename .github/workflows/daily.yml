@@ -3,7 +3,7 @@ name: Daily Stock Selection
 # ─────────────────────────────────────────────────────────
 # 触发条件：
 #   1. 定时：北京时间工作日 15:30 (UTC 07:30) — A 股收盘 30 分钟后
-#   2. 手动：Actions 页面 → Run workflow
+#   2. 手动：Actions 页面 → Run workflow（可勾选 force_backfill）
 # ─────────────────────────────────────────────────────────
 on:
   schedule:
@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       force_backfill:
-        description: '强制回填历史数据（首次部署或补数据）'
+        description: '强制回填历史数据（首次部署或补数据，约 10-15 分钟）'
         required: false
         type: boolean
         default: false
@@ -26,20 +26,74 @@ concurrency:
 permissions:
   contents: write  # commit docs/* + data/*.db cache
 
+# ─────────────────────────────────────────────────────────
+# Jobs 设计：
+#
+#   backfill（条件性）
+#     └─ 仅当 force_backfill=true 时跑，跑完 save cache
+#     └─ timeout 30 分钟
+#
+#   select（每日必跑）
+#     └─ restore cache（如果 miss 则退化为跑增量 sync_today_bulk）
+#     └─ 跑 8 个策略 + commit docs/
+#     └─ timeout 10 分钟（增量同步 3 分钟 + 策略 3 分钟 + buffer）
+# ─────────────────────────────────────────────────────────
 jobs:
-  daily:
+  backfill:
+    name: 数据回填（首次/强制时）
+    runs-on: ubuntu-latest
+    needs: []  # 不依赖其他 job
+    if: ${{ github.event.inputs.force_backfill == 'true' }}
+    timeout-minutes: 30  # 12 分钟 backfill + buffer
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: 'latest'
+
+      - name: Install dependencies
+        run: uv pip install --system -e .
+
+      - name: Run backfill
+        env:
+          CI: 'true'
+          GITHUB_ACTIONS: 'true'
+        run: python main.py --backfill --ci
+
+      - name: Save data cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: |
+            data/sequoia_v2.db
+            data/.github_pages_history.json
+            data/.github_pages_names.json
+          key: sequoia-db-stable-v1  # ⚠️ 稳定 key（不是 run_id），下次 run 可 restore
+
+  select:
     name: 每日选股 + Pages 更新
     runs-on: ubuntu-latest
-    timeout-minutes: 20  # 首次 backfill 约 12 分钟 + 跑策略 3 分钟 + buffer
+    needs: [backfill]  # 等 backfill 跑完（如果 force 触发）
+    timeout-minutes: 10  # 增量同步 3 分钟 + 策略 3 分钟 + buffer
 
     steps:
       # ── 1. checkout（用于 commit docs/）──
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          # 关键：让 git push 能成功（默认 persist-credentials=false）
           token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 0  # 完整历史（push2history 需要）
+          fetch-depth: 0
 
       # ── 2. Python 环境 ──
       - name: Setup Python 3.11
@@ -47,43 +101,88 @@ jobs:
         with:
           python-version: '3.11'
 
-      # ── 3. 安装 uv（快速包管理）──
+      # ── 3. 安装 uv ──
       - name: Install uv
         uses: astral-sh/setup-uv@v3
         with:
           version: 'latest'
 
-      # ── 4. 缓存 SQLite 数据文件（核心：避免每次 backfill 12 分钟）──
-      - name: Cache data/*.db
+      # ── 4. ⚠️ 关键：稳定 cache key（与 backfill job 一致）──
+      #    如果 cache hit → 跳到 step 6 (Run selection)
+      #    如果 cache miss → 退化：run 会尝试增量同步（本地 db 为空时失败）
+      #    提示：第一次跑务必 force_backfill=true 来填充 cache
+      - name: Restore data cache
         uses: actions/cache@v4
+        id: cache
         with:
           path: |
             data/sequoia_v2.db
             data/.github_pages_history.json
             data/.github_pages_names.json
-          key: sequoia-db-${{ github.run_id }}  # 每次 run 唯一 key（避免 stale lock）
+          key: sequoia-db-stable-v1
           restore-keys: |
-            sequoia-db-
+            sequoia-db-stable-v1
+
+      # ── 4b. ⚠️ Fallback：从 GitHub Release 下载 db（如果 cache miss）──
+      #    用法：你跑过 `python scripts/upload_db_to_release.py` 后,
+      #    workflow 会自动从 release 下载 db,无需 force_backfill
+      - name: Download db from release (fallback)
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Cache miss，尝试从 GitHub Release 下载 db..."
+          ASSET_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/v1.0/sequoia_v2.db.tar.gz"
+          if curl -fsSL -o data/sequoia_v2.db.tar.gz "$ASSET_URL" 2>/dev/null; then
+            echo "✅ 下载成功"
+            mkdir -p data
+            tar -xzf data/sequoia_v2.db.tar.gz -C data/
+            rm data/sequoia_v2.db.tar.gz
+            echo "✅ 解压完成"
+            ls -la data/
+          else
+            echo "⚠️  Release v1.0 不存在或 asset 缺失"
+            echo "   请选择以下一种方式初始化 db："
+            echo "   1. 触发 force_backfill=true（首次最慢，~12 分钟）"
+            echo "   2. 或运行 python scripts/upload_db_to_release.py 上传本地 db 到 release"
+          fi
 
       # ── 5. 安装依赖 ──
       - name: Install dependencies
         run: uv pip install --system -e .
 
-      # ── 6. 跑策略 + 推送 ──
+      # ── 6. 检查 cache 状态 ──
+      - name: Verify cache
+        id: check_cache
+        run: |
+          if [ -f data/sequoia_v2.db ]; then
+            # 检查 db 是否有效
+            SIZE=$(stat -c%s data/sequoia_v2.db 2>/dev/null || echo 0)
+            echo "db_size=$SIZE" >> $GITHUB_OUTPUT
+            if [ "$SIZE" -gt 1000000 ]; then
+              echo "db_status=ok" >> $GITHUB_OUTPUT
+              echo "✅ Cache hit: data/sequoia_v2.db ($SIZE bytes)"
+            else
+              echo "db_status=corrupt" >> $GITHUB_OUTPUT
+              echo "⚠️  Cache 文件过小，可能是损坏的"
+            fi
+          else
+            echo "db_status=missing" >> $GITHUB_OUTPUT
+            echo "⚠️  Cache miss：data/sequoia_v2.db 不存在"
+            echo "   请触发 force_backfill=true 手动跑一次初始化"
+          fi
+
+      # ── 7. 跑策略 + 推送 ──
       - name: Run daily selection
         env:
-          # GH Actions 内置 token（有 contents:write 权限）
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # 用户配置的 secrets
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
           GITHUB_REPO: ${{ github.repository }}
           GITHUB_PAGES_BRANCH: master
           GITHUB_PAGES_DIR: docs
           GITHUB_PAGES_ENABLED: 'true'
-          # 标记这是 CI 模式（main.py 据此调整行为）
           CI: 'true'
           GITHUB_ACTIONS: 'true'
-          # 如果有策略专属 webhook，透传所有
           STRATEGY_WEBHOOK_MA_VOLUME: ${{ secrets.STRATEGY_WEBHOOK_MA_VOLUME }}
           STRATEGY_WEBHOOK_TURTLE: ${{ secrets.STRATEGY_WEBHOOK_TURTLE }}
           STRATEGY_WEBHOOK_FLAG: ${{ secrets.STRATEGY_WEBHOOK_FLAG }}
@@ -93,27 +192,20 @@ jobs:
           STRATEGY_WEBHOOK_PRIVATE_PLACEMENT: ${{ secrets.STRATEGY_WEBHOOK_PRIVATE_PLACEMENT }}
           STRATEGY_WEBHOOK_TREND_RESONANCE: ${{ secrets.STRATEGY_WEBHOOK_TREND_RESONANCE }}
           STRATEGY_WEBHOOK_SUMMARY: ${{ secrets.STRATEGY_WEBHOOK_SUMMARY }}
-        run: |
-          if [ "${{ github.event.inputs.force_backfill }}" = "true" ]; then
-            echo "⚠️  强制 backfill 模式"
-            python main.py --backfill --ci
-          else
-            # 日常模式：增量同步（如果 cache hit 则很快；miss 则退化为全量 backfill）
-            python main.py --ci
-          fi
+        run: python main.py --ci
 
-      # ── 7. 保存更新后的数据回 cache ──
+      # ── 8. 保存更新后的数据回 cache ──
       - name: Save data cache
         uses: actions/cache/save@v4
-        if: always()  # 即使失败也保存（debug 用）
+        if: always()
         with:
           path: |
             data/sequoia_v2.db
             data/.github_pages_history.json
             data/.github_pages_names.json
-          key: sequoia-db-${{ github.run_id }}
+          key: sequoia-db-stable-v1
 
-      # ── 8. 总结（Actions 日志面板）──
+      # ── 9. 总结 ──
       - name: Summary
         if: always()
         run: |
@@ -121,5 +213,5 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- 🕐 触发方式: \`${{ github.event_name }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- 🌿 分支: \`${{ github.ref }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- 📅 数据日期: $(date -u +%Y-%m-%d)" >> $GITHUB_STEP_SUMMARY
+          echo "- 💾 Cache 状态: \`${{ steps.check_cache.outputs.db_status }}\` (${{ steps.check_cache.outputs.db_size }} bytes)" >> $GITHUB_STEP_SUMMARY
           echo "- 🌐 Pages 在线: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/" >> $GITHUB_STEP_SUMMARY
