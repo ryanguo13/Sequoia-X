@@ -124,24 +124,24 @@ jobs:
           restore-keys: |
             sequoia-db-stable-v1
 
-      # ── 4b. ⚠️ Fallback：从 GitHub Release 下载 db（如果 cache miss）──
-      #    用法：你跑过 `python scripts/upload_db_to_release.py` 后,
-      #    workflow 会自动从 release 下载 db,无需 force_backfill
-      #    使用 gh CLI 走 GitHub 内部网络,比 curl 稳定
-      - name: Download db from release (fallback)
-        if: steps.cache.outputs.cache-hit != 'true'
+      # ── 4b. ⚠️ Fallback：从 GitHub Release 下载 db ──
+      #    关键: 这个 step ALWAYS 跑（即使 cache hit 也跑），
+      #    因为之前发现 actions/cache 即使 cache-hit 也会把 db 弄坏
+      #    （sync_today_bulk 在 GH Actions 网络下会损坏 db 后 save 一个空 cache）。
+      #    使用 gh CLI 走 GitHub 内部网络,比 curl 稳定。
+      - name: Download db from release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Cache miss，尝试从 GitHub Release 下载 db..."
+          echo "从 GitHub Release 下载 db..."
           if gh release download v1.0 \
               --repo "$GITHUB_REPOSITORY" \
               --pattern 'sequoia_v2.db.tar.gz' \
-              --dir data/ \
+              --dir /tmp/db_dl/ \
               --clobber; then
             echo "✅ 下载成功"
-            tar -xzf data/sequoia_v2.db.tar.gz -C data/
-            rm data/sequoia_v2.db.tar.gz
+            tar -xzf /tmp/db_dl/sequoia_v2.db.tar.gz -C data/
+            rm -rf /tmp/db_dl/
             echo "✅ 解压完成"
             ls -la data/
           else
@@ -200,16 +200,7 @@ jobs:
         # db 用 cache 或 release 下载的即可,数据新鲜度由 cache 持续更新保证
         run: python main.py --ci --no-sync
 
-      # ── 8. 保存更新后的数据回 cache ──
-      - name: Save data cache
-        uses: actions/cache/save@v4
-        if: always()
-        with:
-          path: |
-            data/sequoia_v2.db
-            data/.github_pages_history.json
-            data/.github_pages_names.json
-          key: sequoia-db-stable-v1
+      # ── 8. 总结（不再 save cache，每次都从 release 下载）──
 
       # ── 9. 总结 ──
       - name: Summary
