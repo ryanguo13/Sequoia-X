@@ -18,6 +18,10 @@ ENV/
 
 # 数据库文件
 data/*.db
+data/*.json
+
+# Realtime dashboard 独立子项目
+realtime_dashboard/
 
 # 环境变量
 .env
