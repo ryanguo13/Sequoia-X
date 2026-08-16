@@ -1,1 +1,1 @@
-"""通知模块：飞书 Webhook 推送器。"""
+"""通知模块：飞书 Webhook 推送器 + GitHub Pages 静态站推送器。"""

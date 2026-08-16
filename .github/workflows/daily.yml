@@ -1,0 +1,125 @@
+name: Daily Stock Selection
+
+# ─────────────────────────────────────────────────────────
+# 触发条件：
+#   1. 定时：北京时间工作日 15:30 (UTC 07:30) — A 股收盘 30 分钟后
+#   2. 手动：Actions 页面 → Run workflow
+# ─────────────────────────────────────────────────────────
+on:
+  schedule:
+    # 30 7 * * 1-5  =  UTC 07:30, 周一至周五  =  北京时间 15:30 工作日
+    - cron: '30 7 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      force_backfill:
+        description: '强制回填历史数据（首次部署或补数据）'
+        required: false
+        type: boolean
+        default: false
+
+# 防止并发 run（数据 race）
+concurrency:
+  group: daily-stock-selection
+  cancel-in-progress: false
+
+# 默认权限：只读，commit 时显式升级
+permissions:
+  contents: write  # commit docs/* + data/*.db cache
+
+jobs:
+  daily:
+    name: 每日选股 + Pages 更新
+    runs-on: ubuntu-latest
+    timeout-minutes: 20  # 首次 backfill 约 12 分钟 + 跑策略 3 分钟 + buffer
+
+    steps:
+      # ── 1. checkout（用于 commit docs/）──
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # 关键：让 git push 能成功（默认 persist-credentials=false）
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0  # 完整历史（push2history 需要）
+
+      # ── 2. Python 环境 ──
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # ── 3. 安装 uv（快速包管理）──
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: 'latest'
+
+      # ── 4. 缓存 SQLite 数据文件（核心：避免每次 backfill 12 分钟）──
+      - name: Cache data/*.db
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/sequoia_v2.db
+            data/.github_pages_history.json
+            data/.github_pages_names.json
+          key: sequoia-db-${{ github.run_id }}  # 每次 run 唯一 key（避免 stale lock）
+          restore-keys: |
+            sequoia-db-
+
+      # ── 5. 安装依赖 ──
+      - name: Install dependencies
+        run: uv pip install --system -e .
+
+      # ── 6. 跑策略 + 推送 ──
+      - name: Run daily selection
+        env:
+          # GH Actions 内置 token（有 contents:write 权限）
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 用户配置的 secrets
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          GITHUB_REPO: ${{ github.repository }}
+          GITHUB_PAGES_BRANCH: master
+          GITHUB_PAGES_DIR: docs
+          GITHUB_PAGES_ENABLED: 'true'
+          # 标记这是 CI 模式（main.py 据此调整行为）
+          CI: 'true'
+          GITHUB_ACTIONS: 'true'
+          # 如果有策略专属 webhook，透传所有
+          STRATEGY_WEBHOOK_MA_VOLUME: ${{ secrets.STRATEGY_WEBHOOK_MA_VOLUME }}
+          STRATEGY_WEBHOOK_TURTLE: ${{ secrets.STRATEGY_WEBHOOK_TURTLE }}
+          STRATEGY_WEBHOOK_FLAG: ${{ secrets.STRATEGY_WEBHOOK_FLAG }}
+          STRATEGY_WEBHOOK_SHAKEOUT: ${{ secrets.STRATEGY_WEBHOOK_SHAKEOUT }}
+          STRATEGY_WEBHOOK_LIMIT_DOWN: ${{ secrets.STRATEGY_WEBHOOK_LIMIT_DOWN }}
+          STRATEGY_WEBHOOK_RPS: ${{ secrets.STRATEGY_WEBHOOK_RPS }}
+          STRATEGY_WEBHOOK_PRIVATE_PLACEMENT: ${{ secrets.STRATEGY_WEBHOOK_PRIVATE_PLACEMENT }}
+          STRATEGY_WEBHOOK_TREND_RESONANCE: ${{ secrets.STRATEGY_WEBHOOK_TREND_RESONANCE }}
+          STRATEGY_WEBHOOK_SUMMARY: ${{ secrets.STRATEGY_WEBHOOK_SUMMARY }}
+        run: |
+          if [ "${{ github.event.inputs.force_backfill }}" = "true" ]; then
+            echo "⚠️  强制 backfill 模式"
+            python main.py --backfill --ci
+          else
+            # 日常模式：增量同步（如果 cache hit 则很快；miss 则退化为全量 backfill）
+            python main.py --ci
+          fi
+
+      # ── 7. 保存更新后的数据回 cache ──
+      - name: Save data cache
+        uses: actions/cache/save@v4
+        if: always()  # 即使失败也保存（debug 用）
+        with:
+          path: |
+            data/sequoia_v2.db
+            data/.github_pages_history.json
+            data/.github_pages_names.json
+          key: sequoia-db-${{ github.run_id }}
+
+      # ── 8. 总结（Actions 日志面板）──
+      - name: Summary
+        if: always()
+        run: |
+          echo "## 📊 Sequoia-X 每日播报" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- 🕐 触发方式: \`${{ github.event_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- 🌿 分支: \`${{ github.ref }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- 📅 数据日期: $(date -u +%Y-%m-%d)" >> $GITHUB_STEP_SUMMARY
+          echo "- 🌐 Pages 在线: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/" >> $GITHUB_STEP_SUMMARY

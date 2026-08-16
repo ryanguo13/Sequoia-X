@@ -1,10 +1,10 @@
 """配置管理属性测试。"""
 
 import os
-import pytest
-from hypothesis import given, settings as h_settings, HealthCheck
+
+from hypothesis import HealthCheck, given
+from hypothesis import settings as h_settings
 from hypothesis import strategies as st
-from pydantic import ValidationError
 
 
 # Feature: sequoia-x-v2, Property 1: 环境变量覆盖配置默认值
@@ -21,17 +21,39 @@ def test_env_overrides_default(db_path: str, monkeypatch) -> None:
     assert s.db_path == db_path
 
 
-# Feature: sequoia-x-v2, Property 2: 缺失必填字段触发 ValidationError
-def test_missing_required_field_raises() -> None:
-    """属性 2：缺少 feishu_webhook_url 时，实例化 Settings 应抛出 ValidationError。"""
-    import os
+# Feature: sequoia-x-v2, Property 2: 缺失可选字段使用默认值
+def test_missing_optional_field_uses_default() -> None:
+    """属性 2：feishu_webhook_url 是可选字段，缺失时使用空字符串默认值（不抛 ValidationError）。
+
+    设计权衡：让 Settings 在缺省场景下仍能构造（如 CI 环境未配 webhook）。
+    飞书推送会通过 FeishuNotifier.is_configured 自动跳过。
+    """
     from sequoia_x.core.config import Settings
-    # 确保环境变量中没有该字段
+    # 确保环境变量和 .env 中都没有该字段
     env_backup = os.environ.pop("FEISHU_WEBHOOK_URL", None)
     try:
-        with pytest.raises(ValidationError) as exc_info:
-            Settings(_env_file=None)
-        assert "feishu_webhook_url" in str(exc_info.value).lower()
+        s = Settings(_env_file=None)
+        # 默认值应是空字符串
+        assert s.feishu_webhook_url == ""
+        # feishu notifier 应能正常构造 + is_configured 返回 False
+        from sequoia_x.notify.feishu import FeishuNotifier
+        n = FeishuNotifier(s)
+        assert n.is_configured is False
+    finally:
+        if env_backup is not None:
+            os.environ["FEISHU_WEBHOOK_URL"] = env_backup
+
+
+# Feature: sequoia-x-v2, Property 2b: feishu 配置后 is_configured 返回 True
+def test_feishu_configured_when_webhook_set() -> None:
+    """属性 2b：配置 FEISHU_WEBHOOK_URL 后，FeishuNotifier.is_configured 应返回 True。"""
+    from sequoia_x.core.config import Settings
+    from sequoia_x.notify.feishu import FeishuNotifier
+    env_backup = os.environ.pop("FEISHU_WEBHOOK_URL", None)
+    try:
+        s = Settings(_env_file=None, feishu_webhook_url="https://example.com/hook")
+        n = FeishuNotifier(s)
+        assert n.is_configured is True
     finally:
         if env_backup is not None:
             os.environ["FEISHU_WEBHOOK_URL"] = env_backup

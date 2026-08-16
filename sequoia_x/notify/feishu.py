@@ -41,6 +41,11 @@ class FeishuNotifier:
         """
         self.settings = settings
 
+    @property
+    def is_configured(self) -> bool:
+        """飞书是否已配置（用于 main.py 的条件判断）。"""
+        return bool(self.settings.feishu_webhook_url)
+
     @staticmethod
     def _to_xueqiu_code(code: str) -> str:
         """将纯数字代码转为雪球格式：6开头→SH，4/8开头→BJ，其余→SZ。"""

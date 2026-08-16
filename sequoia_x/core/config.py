@@ -6,8 +6,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     db_path: str = "data/sequoia_v2.db"
     start_date: str = "2024-01-01"
-    feishu_webhook_url: str  # 必填字段，缺失时抛出 ValidationError
+    feishu_webhook_url: str = ""  # 可选；为空时飞书推送自动跳过
     strategy_webhooks: dict[str, str] = {}
+
+    # ── GitHub Pages 推送配置（可选；未配置时 GithubPagesNotifier 自动跳过） ──
+    github_token: str = ""  # GitHub PAT (classic 或 fine-grained)，需含 `repo` 权限
+    github_repo: str = ""  # 格式 "owner/name"，例如 "ryanguo13/Sequoia-X"
+    github_pages_branch: str = "master"  # Pages 源分支
+    github_pages_dir: str = "docs"  # Pages 源目录（仓库内路径）
+    github_pages_enabled: bool = True  # 全局开关
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -19,7 +26,6 @@ class Settings(BaseSettings):
     @classmethod
     def settings_customise_sources(cls, settings_cls, **kwargs):  # type: ignore[override]
         """扩展配置源，支持从环境变量中扫描 STRATEGY_WEBHOOK_ 前缀的键。"""
-        from pydantic_settings import EnvSettingsSource
         import os
 
         sources = super().settings_customise_sources(settings_cls, **kwargs)
