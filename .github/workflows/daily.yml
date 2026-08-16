@@ -127,22 +127,25 @@ jobs:
       # ── 4b. ⚠️ Fallback：从 GitHub Release 下载 db（如果 cache miss）──
       #    用法：你跑过 `python scripts/upload_db_to_release.py` 后,
       #    workflow 会自动从 release 下载 db,无需 force_backfill
+      #    使用 gh CLI 走 GitHub 内部网络,比 curl 稳定
       - name: Download db from release (fallback)
         if: steps.cache.outputs.cache-hit != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "Cache miss，尝试从 GitHub Release 下载 db..."
-          ASSET_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/v1.0/sequoia_v2.db.tar.gz"
-          if curl -fsSL -o data/sequoia_v2.db.tar.gz "$ASSET_URL" 2>/dev/null; then
+          if gh release download v1.0 \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern 'sequoia_v2.db.tar.gz' \
+              --dir data/ \
+              --clobber; then
             echo "✅ 下载成功"
-            mkdir -p data
             tar -xzf data/sequoia_v2.db.tar.gz -C data/
             rm data/sequoia_v2.db.tar.gz
             echo "✅ 解压完成"
             ls -la data/
           else
-            echo "⚠️  Release v1.0 不存在或 asset 缺失"
+            echo "⚠️  Release v1.0 下载失败"
             echo "   请选择以下一种方式初始化 db："
             echo "   1. 触发 force_backfill=true（首次最慢，~12 分钟）"
             echo "   2. 或运行 python scripts/upload_db_to_release.py 上传本地 db 到 release"
