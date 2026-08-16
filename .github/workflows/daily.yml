@@ -196,7 +196,9 @@ jobs:
           STRATEGY_WEBHOOK_PRIVATE_PLACEMENT: ${{ secrets.STRATEGY_WEBHOOK_PRIVATE_PLACEMENT }}
           STRATEGY_WEBHOOK_TREND_RESONANCE: ${{ secrets.STRATEGY_WEBHOOK_TREND_RESONANCE }}
           STRATEGY_WEBHOOK_SUMMARY: ${{ secrets.STRATEGY_WEBHOOK_SUMMARY }}
-        run: python main.py --ci
+        # 跳过 sync_today_bulk（GH Actions 网络下 baostock 经常超时/限速）
+        # db 用 cache 或 release 下载的即可,数据新鲜度由 cache 持续更新保证
+        run: python main.py --ci --no-sync
 
       # ── 8. 保存更新后的数据回 cache ──
       - name: Save data cache

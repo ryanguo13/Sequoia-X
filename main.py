@@ -48,12 +48,18 @@ def main() -> None:
         action="store_true",
         help="CI 模式：用于 GitHub Actions，跳过 .env 加载，假定环境变量已就绪",
     )
+    parser.add_argument(
+        "--no-sync",
+        action="store_true",
+        help="跳过 sync_today_bulk（增量同步），直接用本地 db 跑策略。"
+             "用于 CI 环境 baostock 不稳定时避免 workflow 超时",
+    )
     args = parser.parse_args()
 
     is_ci = args.ci or bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
     if is_ci:
         # GitHub Actions 友好日志
-        print("::group::Sequoia-X V2 启动（CI 模式）")
+        print(f"::group::Sequoia-X V2 启动（CI 模式）")
 
     try:
         # 1. 初始化配置
@@ -75,9 +81,12 @@ def main() -> None:
             return
 
         # ── 日常模式：单次 API 补今天 + 策略 + 推送 ──
-        logger.info("开始拉取最新快照...")
-        count = engine.sync_today_bulk()
-        logger.info(f"快照同步完成，写入 {count} 只股票")
+        if args.no_sync:
+            logger.info("⏭️  跳过 sync_today_bulk（--no-sync 模式）")
+        else:
+            logger.info("开始拉取最新快照...")
+            count = engine.sync_today_bulk()
+            logger.info(f"快照同步完成，写入 {count} 只股票")
 
         # 4. 策略列表（新增策略在此追加即可）
         strategies: list[BaseStrategy] = [
